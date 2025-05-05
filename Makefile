@@ -4,4 +4,7 @@ build:
 bash:
 	@docker compose run --remove-orphans --service-ports go-taglib bash
 
-.PHONY: build bash
+gen:
+	@docker compose run --remove-orphans go-taglib go generate ./...
+
+.PHONY: build bash gen
