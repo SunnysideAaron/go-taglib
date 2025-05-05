@@ -1,0 +1,9 @@
+services:
+  go-taglib:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: go-taglib
+    volumes:
+      - .:/go-taglib
+    working_dir: /go-taglib
