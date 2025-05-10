@@ -434,3 +434,13 @@ taglib_file_clear_images(const char *filename) {
 
   return file.save();
 }
+
+__attribute__((export_name("taglib_file_image_count"))) int
+taglib_file_image_count(const char *filename) {
+  TagLib::FileRef file(filename);
+  if (file.isNull() || !file.audioProperties())
+    return 0;
+
+  const auto& pictures = file.complexProperties("PICTURE");
+  return pictures.size();
+}

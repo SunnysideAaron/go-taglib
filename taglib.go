@@ -788,3 +788,27 @@ func ClearImages(path string) error {
 	}
 	return nil
 }
+
+// CountImages returns the number of embedded images in the audio file at the given path.
+// Returns 0 if there are no images or if the file cannot be read.
+func CountImages(path string) (int, error) {
+	var err error
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return 0, fmt.Errorf("make path abs %w", err)
+	}
+
+	dir := filepath.Dir(path)
+	mod, err := newModuleRO(dir)
+	if err != nil {
+		return 0, fmt.Errorf("init module: %w", err)
+	}
+	defer mod.close()
+
+	var count int
+	if err := mod.call("taglib_file_image_count", &count, wasmPath(path)); err != nil {
+		return 0, fmt.Errorf("call: %w", err)
+	}
+
+	return count, nil
+}
