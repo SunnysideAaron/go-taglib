@@ -148,8 +148,6 @@ func ReadTags(path string) (map[string][]string, error) {
 	var err error
 	path, err = filepath.Abs(path)
 
-	//fmt.Println("test, yes i'm here. 2")
-
 	if err != nil {
 		return nil, fmt.Errorf("make path abs %w", err)
 	}
@@ -159,7 +157,47 @@ func ReadTags(path string) (map[string][]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
+
+	var raw []string
+	if err := mod.call("taglib_file_tags", &raw, wasmPath(path)); err != nil {
+		return nil, fmt.Errorf("call: %w", err)
+	}
+	if raw == nil {
+		return nil, ErrInvalidFile
+	}
+
+	var tags = map[string][]string{}
+	for _, row := range raw {
+		k, v, ok := strings.Cut(row, "\t")
+		if !ok {
+			continue
+		}
+		tags[k] = append(tags[k], v)
+	}
+	return tags, nil
+}
+
+// ReadTagsWithModule reads all metadata tags from an audio file using an existing module.
+// This allows reusing the same module for multiple files in the same directory.
+func ReadTagsWithModule(path string, mod Module) (map[string][]string, error) {
+	var err error
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("make path abs %w", err)
+	}
+
+	// Check if the file exists and is readable
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, fmt.Errorf("file does not exist: %s", path)
+	}
+
+	// Try to open the file to ensure it's not locked
+	file, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("file open error: %w", err)
+	}
+	file.Close()
 
 	var raw []string
 	if err := mod.call("taglib_file_tags", &raw, wasmPath(path)); err != nil {
@@ -196,7 +234,7 @@ func ReadID3v2Frames(path string) (map[string][]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
 
 	var raw []string
 	if err := mod.call("taglib_file_id3v2_frames", &raw, wasmPath(path)); err != nil {
@@ -234,7 +272,65 @@ func ReadID3v1Frames(path string) (map[string][]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
+
+	var raw []string
+	if err := mod.call("taglib_file_id3v1_tags", &raw, wasmPath(path)); err != nil {
+		return nil, fmt.Errorf("call: %w", err)
+	}
+	if raw == nil {
+		return nil, ErrInvalidFile
+	}
+
+	// If raw is empty, the file has no ID3v1 tags
+	var frames = map[string][]string{}
+	for _, row := range raw {
+		parts := strings.SplitN(row, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		frames[parts[0]] = append(frames[parts[0]], parts[1])
+	}
+	return frames, nil
+}
+
+// ReadID3v2FramesWithModule reads all ID3v2 frames from an MP3 file using an existing module.
+// This allows reusing the same module for multiple files in the same directory.
+func ReadID3v2FramesWithModule(path string, mod Module) (map[string][]string, error) {
+	var err error
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("make path abs %w", err)
+	}
+
+	var raw []string
+	if err := mod.call("taglib_file_id3v2_frames", &raw, wasmPath(path)); err != nil {
+		return nil, fmt.Errorf("call: %w", err)
+	}
+	if raw == nil {
+		return nil, ErrInvalidFile
+	}
+
+	// If raw is empty, the file has no ID3v2 frames
+	var frames = map[string][]string{}
+	for _, row := range raw {
+		parts := strings.SplitN(row, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		frames[parts[0]] = append(frames[parts[0]], parts[1])
+	}
+	return frames, nil
+}
+
+// ReadID3v1FramesWithModule reads all ID3v1 tags from an MP3 file using an existing module.
+// This allows reusing the same module for multiple files in the same directory.
+func ReadID3v1FramesWithModule(path string, mod Module) (map[string][]string, error) {
+	var err error
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("make path abs %w", err)
+	}
 
 	var raw []string
 	if err := mod.call("taglib_file_id3v1_tags", &raw, wasmPath(path)); err != nil {
@@ -281,7 +377,7 @@ func ReadProperties(path string) (Properties, error) {
 	if err != nil {
 		return Properties{}, fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
 
 	const (
 		audioPropertyLengthInMilliseconds = iota
@@ -329,7 +425,7 @@ func WriteTags(path string, tags map[string][]string, opts WriteOption) error {
 	if err != nil {
 		return fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
 
 	var raw []string
 	for k, vs := range tags {
@@ -374,7 +470,7 @@ func WriteID3v2Frames(path string, frames map[string][]string, opts WriteOption)
 	if err != nil {
 		return fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
 
 	// Convert the frames map to a slice of strings
 	var framesList []string
@@ -447,16 +543,36 @@ var getRuntimeOnce = sync.OnceValues(func() (rc, error) {
 	}, nil
 })
 
-type module struct {
+// Module represents a WASM module instance
+type Module struct {
 	mod api.Module
 }
 
-func newModule(dir string) (module, error)   { return newModuleOpt(dir, false) }
-func newModuleRO(dir string) (module, error) { return newModuleOpt(dir, true) }
-func newModuleOpt(dir string, readOnly bool) (module, error) {
+// NewModuleRO creates a new read-only module for the given directory
+func NewModuleRO(dir string) (Module, error) {
+	return newModuleOpt(dir, true)
+}
+
+// newModule creates a new read-write module for the given directory
+func newModule(dir string) (Module, error) {
+	return newModuleOpt(dir, false)
+}
+
+// newModuleRO creates a new read-only module for the given directory
+func newModuleRO(dir string) (Module, error) {
+	return newModuleOpt(dir, true)
+}
+
+// newModuleOpt creates a new module with the given read-only flag
+func newModuleOpt(dir string, readOnly bool) (Module, error) {
 	rt, err := getRuntimeOnce()
 	if err != nil {
-		return module{}, fmt.Errorf("get runtime once: %w", err)
+		return Module{}, fmt.Errorf("get runtime once: %w", err)
+	}
+
+	// Ensure the directory exists and is accessible
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return Module{}, fmt.Errorf("directory does not exist: %s", dir)
 	}
 
 	fsConfig := wazero.NewFSConfig()
@@ -470,106 +586,146 @@ func newModuleOpt(dir string, readOnly bool) (module, error) {
 		NewModuleConfig().
 		WithName("").
 		WithStartFunctions("_initialize").
-		WithFSConfig(fsConfig)
+		WithFSConfig(fsConfig).
+		WithStderr(os.Stderr) // Add this to see WASM stderr output
 
 	ctx := context.Background()
 	mod, err := rt.Runtime.InstantiateModule(ctx, rt.CompiledModule, cfg)
 	if err != nil {
-		return module{}, err
+		return Module{}, fmt.Errorf("instantiate module: %w", err)
 	}
 
-	return module{
+	return Module{
 		mod: mod,
 	}, nil
 }
 
-func (m *module) malloc(size uint32) uint32 {
-	var ptr uint32
-	if err := m.call("malloc", &ptr, size); err != nil {
-		panic(err)
-	}
-	if ptr == 0 {
-		panic("no ptr")
-	}
-	return ptr
-}
-
-func (m *module) call(name string, dest any, args ...any) error {
-	params := make([]uint64, 0, len(args))
-	for _, a := range args {
-		switch a := a.(type) {
-		case bool:
-			if a {
-				params = append(params, 1)
-			} else {
-				params = append(params, 0)
-			}
-		case int:
-			params = append(params, uint64(a))
-		case uint8:
-			params = append(params, uint64(a))
-		case uint32:
-			params = append(params, uint64(a))
-		case uint64:
-			params = append(params, a)
-		case []byte:
-			params = append(params, uint64(makeByteArray(m, a)))
-		case string:
-			params = append(params, uint64(makeString(m, a)))
-		case []string:
-			params = append(params, uint64(makeStrings(m, a)))
-		default:
-			panic(fmt.Sprintf("unknown argument type %T", a))
-		}
-	}
-
-	results, err := m.mod.ExportedFunction(name).Call(context.Background(), params...)
-	if err != nil {
-		return fmt.Errorf("call %q: %w", name, err)
-	}
-	if len(results) == 0 {
-		return nil
-	}
-	result := results[0]
-
-	switch dest := dest.(type) {
-	case *int:
-		*dest = int(result)
-	case *uint32:
-		*dest = uint32(result)
-	case *uint64:
-		*dest = uint64(result)
-	case *bool:
-		*dest = result == 1
-	case *string:
-		if result != 0 {
-			*dest = readString(m, uint32(result))
-		}
-	case *[]string:
-		if result != 0 {
-			*dest = readStrings(m, uint32(result))
-		}
-	case *[]int:
-		if result != 0 {
-			*dest = readInts(m, uint32(result), cap(*dest))
-		}
-	case *picture:
-		if result != 0 {
-			*dest = readPicture(m, uint32(result))
-		}
-	default:
-		panic(fmt.Sprintf("unknown result type %T", dest))
-	}
-	return nil
-}
-
-func (m *module) close() {
+func (m *Module) Close() {
 	if err := m.mod.Close(context.Background()); err != nil {
 		panic(err)
 	}
 }
 
-func makeByteArray(m *module, b []byte) uint32 {
+func (m *Module) call(name string, ret interface{}, args ...interface{}) error {
+	fn := m.mod.ExportedFunction(name)
+	if fn == nil {
+		return fmt.Errorf("function %q not found", name)
+	}
+
+	// Convert args to WASM args
+	var wasmArgs []uint64
+	var toFree []uint32
+	defer func() {
+		for _, ptr := range toFree {
+			m.free(ptr)
+		}
+	}()
+
+	for _, arg := range args {
+		switch v := arg.(type) {
+		case string:
+			ptr, err := m.alloc(len(v) + 1)
+			if err != nil {
+				return fmt.Errorf("alloc string: %w", err)
+			}
+			if err := m.writeString(ptr, v); err != nil {
+				return fmt.Errorf("write string: %w", err)
+			}
+			wasmArgs = append(wasmArgs, uint64(ptr))
+			toFree = append(toFree, ptr)
+		case []byte:
+			ptr, err := m.alloc(len(v))
+			if err != nil {
+				return fmt.Errorf("alloc bytes: %w", err)
+			}
+			if err := m.writeBytes(ptr, v); err != nil {
+				return fmt.Errorf("write bytes: %w", err)
+			}
+			wasmArgs = append(wasmArgs, uint64(ptr))
+			toFree = append(toFree, ptr)
+		case int:
+			wasmArgs = append(wasmArgs, uint64(v))
+		case uint8:
+			wasmArgs = append(wasmArgs, uint64(v))
+		case uint32:
+			wasmArgs = append(wasmArgs, uint64(v))
+		case uint64:
+			wasmArgs = append(wasmArgs, v)
+		default:
+			return fmt.Errorf("unsupported argument type %T", arg)
+		}
+	}
+
+	// Call the function
+	results, err := fn.Call(context.Background(), wasmArgs...)
+	if err != nil {
+		return fmt.Errorf("call error: %w", err)
+	}
+
+	if len(results) == 0 {
+		return nil
+	}
+
+	switch v := ret.(type) {
+	case *bool:
+		*v = results[0] != 0
+	case *int:
+		*v = int(results[0])
+	case *[]string:
+		ptr := uint32(results[0])
+		if ptr == 0 {
+			*v = nil
+			return nil
+		}
+		*v = readStrings(m, ptr)
+		m.free(ptr)
+	case *picture:
+		ptr := uint32(results[0])
+		if ptr == 0 {
+			*v = nil
+			return nil
+		}
+		*v = readPicture(m, ptr)
+		m.free(ptr)
+	case *[]int:
+		ptr := uint32(results[0])
+		if ptr == 0 {
+			*v = nil
+			return nil
+		}
+		*v = readInts(m, ptr, cap(*v))
+		m.free(ptr)
+	default:
+		return fmt.Errorf("unsupported return type %T", ret)
+	}
+
+	return nil
+}
+
+func (m *Module) alloc(size uint32) uint32 {
+	fn := m.mod.ExportedFunction("malloc")
+	if fn == nil {
+		panic("malloc not found")
+	}
+	results, err := fn.Call(context.Background(), uint64(size))
+	if err != nil {
+		panic(err)
+	}
+	return uint32(results[0])
+}
+
+func (m *Module) free(ptr uint32) {
+	fn := m.mod.ExportedFunction("free")
+	if fn == nil {
+		panic("free not found")
+	}
+	_, err := fn.Call(context.Background(), uint64(ptr))
+	if err != nil {
+		panic(err)
+	}
+}
+
+func makeByteArray(m *Module, b []byte) uint32 {
 	ptr := m.malloc(uint32(len(b)))
 	if !m.mod.Memory().Write(ptr, b) {
 		panic("failed to write to mod.module.Memory()")
@@ -577,7 +733,7 @@ func makeByteArray(m *module, b []byte) uint32 {
 	return ptr
 }
 
-func makeString(m *module, s string) uint32 {
+func makeString(m *Module, s string) uint32 {
 	b := append([]byte(s), 0)
 	ptr := m.malloc(uint32(len(b)))
 	if !m.mod.Memory().Write(ptr, b) {
@@ -586,7 +742,7 @@ func makeString(m *module, s string) uint32 {
 	return ptr
 }
 
-func makeStrings(m *module, s []string) uint32 {
+func makeStrings(m *Module, s []string) uint32 {
 	arrayPtr := m.malloc(uint32((len(s) + 1) * 4))
 	for i, s := range s {
 		b := append([]byte(s), 0)
@@ -604,7 +760,33 @@ func makeStrings(m *module, s []string) uint32 {
 	return arrayPtr
 }
 
-func readPicture(m *module, ptr uint32) picture {
+func readStrings(m *Module, ptr uint32) []string {
+	var ret []string
+	for {
+		strPtr, ok := m.mod.Memory().ReadUint32Le(ptr)
+		if !ok || strPtr == 0 {
+			break
+		}
+		ret = append(ret, readString(m, strPtr))
+		ptr += 4
+	}
+	return ret
+}
+
+func readString(m *Module, ptr uint32) string {
+	var bytes []byte
+	for {
+		b, ok := m.mod.Memory().ReadByte(ptr)
+		if !ok || b == 0 {
+			break
+		}
+		bytes = append(bytes, b)
+		ptr++
+	}
+	return string(bytes)
+}
+
+func readPicture(m *Module, ptr uint32) picture {
 	size, ok := m.mod.Memory().ReadUint32Le(ptr)
 	if !ok {
 		panic("memory error")
@@ -627,46 +809,7 @@ func readPicture(m *module, ptr uint32) picture {
 	return ret
 }
 
-func readString(m *module, ptr uint32) string {
-	size := uint32(64)
-	buf, ok := m.mod.Memory().Read(ptr, size)
-	if !ok {
-		panic("memory error")
-	}
-	if i := bytes.IndexByte(buf, 0); i >= 0 {
-		return string(buf[:i])
-	}
-	for {
-		next, ok := m.mod.Memory().Read(ptr+size, size)
-		if !ok {
-			panic("memory error")
-		}
-		if i := bytes.IndexByte(next, 0); i >= 0 {
-			return string(append(buf, next[:i]...))
-		}
-		buf = append(buf, next...)
-		size += size
-	}
-}
-
-func readStrings(m *module, ptr uint32) []string {
-	strs := []string{} // non nil so call knows if it's just empty
-	for {
-		stringPtr, ok := m.mod.Memory().ReadUint32Le(ptr)
-		if !ok {
-			panic("memory error")
-		}
-		if stringPtr == 0 {
-			break
-		}
-		str := readString(m, stringPtr)
-		strs = append(strs, str)
-		ptr += 4
-	}
-	return strs
-}
-
-func readInts(m *module, ptr uint32, len int) []int {
+func readInts(m *Module, ptr uint32, len int) []int {
 	ints := make([]int, 0, len)
 	for i := range len {
 		i, ok := m.mod.Memory().ReadUint32Le(ptr + uint32(4*i))
@@ -699,7 +842,7 @@ func ReadImageRaw(path string) (io.Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
 
 	var img picture
 	if err := mod.call("taglib_file_read_image", &img, wasmPath(path)); err != nil {
@@ -753,7 +896,7 @@ func WriteImageRaw(path string, image []byte) error {
 	if err != nil {
 		return fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
 
 	var out bool
 	if err := mod.call("taglib_file_write_image", &out, wasmPath(path), image, len(image)); err != nil {
@@ -777,7 +920,7 @@ func ClearImages(path string) error {
 	if err != nil {
 		return fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
 
 	var out bool
 	if err := mod.call("taglib_file_clear_images", &out, wasmPath(path)); err != nil {
@@ -803,7 +946,7 @@ func CountImages(path string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("init module: %w", err)
 	}
-	defer mod.close()
+	defer mod.Close()
 
 	var count int
 	if err := mod.call("taglib_file_image_count", &count, wasmPath(path)); err != nil {

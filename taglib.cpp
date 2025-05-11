@@ -31,11 +31,17 @@ __attribute__((export_name("malloc"))) void *exported_malloc(size_t size) {
   return malloc(size);
 }
 
+__attribute__((export_name("free"))) void exported_free(void *ptr) {
+  free(ptr);
+}
+
 __attribute__((export_name("taglib_file_tags"))) char **
 taglib_file_tags(const char *filename) {
   TagLib::FileRef file(filename);
-  if (file.isNull())
+  if (file.isNull()) {
+    fprintf(stderr, "Failed to open file: %s\n", filename);
     return nullptr;
+  }
 
   auto properties = file.properties();
 
